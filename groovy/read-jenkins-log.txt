@@ -1,0 +1,100 @@
+def downloadUrl = "";
+  def  sonarAnlsUrl = "";
+  //获取job构建是否成功的结果
+  def result = manager.getResult();
+ def buildResult="false";
+  if("success".equalsIgnoreCase(result)){ //job构建成功
+   //根据日志解析出上传的url
+    def nexusUrl=manager.build.buildVariables.get("nexusUrl");
+    def sonarUrl=manager.build.buildVariables.get("sonarUrl");
+    def logFile = manager.build.logFile;   
+    def br = new BufferedReader(new FileReader(logFile));
+        def urlList = new ArrayList<String>();
+        def line = br.readLine();
+        while (line != null) {
+            line = line.trim();
+            if (line.startsWith("Uploaded:") && (line.indexOf(".jar") > -1 || line.indexOf(".war") > -1)) {
+                def beginIndex = line.indexOf(nexusUrl);
+                def jarIndex = line.indexOf(".jar");
+                def warIndex = line.indexOf(".war");
+                def endIndx;
+                if (jarIndex > -1) {
+                    endIndx = jarIndex + 4;
+                } else {
+                    endIndx = warIndex + 4;
+                }
+                def url = line.substring(beginIndex, endIndx);
+                if (url != null) {
+                    urlList.add(url);
+                }
+            }  else if (line.indexOf(sonarUrl) != -1) {
+                    sonarAnlsUrl = line.substring(line.indexOf(sonarUrl));
+            }
+            line = br.readLine();
+        }
+        br.close();
+       //判断要返回的url
+        def deployModule=manager.build.buildVariables.get("deployModule");       
+        def size = urlList.size();       
+        if (size == 0) {
+            downloadUrl = "没有获取到任何有效的包下载地址"
+        } else if (size == 1) {
+            downloadUrl = urlList.get(0);
+            buildResult="true";
+        } else if (size > 1) {
+            if(!"default".equalsIgnoreCase(deployModule)){
+                def targetUrl="";
+                for (String s : urlList) {
+                    def name=s.substring(s.lastIndexOf("/"),s.length());
+                    if(name.toLowerCase().contains(deployModule.toLowerCase())){
+                        targetUrl=s;
+                        break;
+                    }
+                }
+                if(targetUrl.length()>0){
+                    downloadUrl=targetUrl;
+                    buildResult="true";
+                }else{
+                    downloadUrl="没有获取到与指定部署模块（"+deployModule+"）匹配的包地址";
+                }
+
+            }else{
+                downloadUrl="未指定部署模块名，无法返回正确的包下载地址";
+            }
+        }  
+  }else{ //job构建失败
+     def buildUrl=manager.envVars["BUILD_URL"];
+     downloadUrl="Jenkins构建job失败，请访问构建地址查看日志 ："+buildUrl;
+  }
+    //将解析的url传回到zbCloud  
+   def jsonTemplate = "{\"namespace\":\"zb.ecc.project.zbdevops.ci.callback\"," +
+                "\"pId\":\"<pId>\"," +
+                "\"url\":\"<url>\"," +
+                "\"sonarUrl\":\"<sonarUrl>\"," +
+                "\"success\":\"<success>\"}";
+    def requestUrl= manager.build.buildVariables.get("callBack");
+    def pId= manager.build.buildVariables.get("pId");      
+  //替换实际的变量值
+   def jsonStr = jsonTemplate.replace("<pId>", pId).replace("<url>", downloadUrl).replace("<sonarUrl>", sonarAnlsUrl ).replace("<success>", buildResult);
+    HttpURLConnection conn = null;
+    try {
+      URL request= new URL(requestUrl);
+      conn = (HttpURLConnection) request.openConnection();
+      conn.setUseCaches(false);
+      conn.setDoOutput(true);
+      conn.setRequestMethod("POST");
+      conn.setConnectTimeout(30 * 1000);
+      conn.setReadTimeout(30 * 1000);
+      conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+      def os = conn.getOutputStream();
+      os.write(jsonStr.getBytes("UTF-8"));
+      os.close();
+      int code = conn.getResponseCode();
+      println("responseCode=" + code);
+    } catch (IOException e) {
+      println e;
+    } finally {
+      if (conn != null) {
+        conn.disconnect();
+      }
+    }
